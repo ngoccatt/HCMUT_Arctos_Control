@@ -5,6 +5,8 @@ import can
 import keyboard
 from queue import Queue
 import pygame
+from mks_api import *
+from game_pad import *
 
 pygame.init()
 pygame.joystick.init()
@@ -17,75 +19,16 @@ print(f"Name of joystick: {joystick.get_name()}")
 axis_state = {0: 0, 1: 0}
 previous_axis_values = {0: 0, 1: 0}
 max_reached = {0: False, 1: False}
+isStoppedBuffer = [False, False, False, False, False, False]
 
-def on_up_arrow():
-    if (not commandQueue.full()):
-        commandQueue.put(prepareCanMessage(0x02, prepareSpeedmodeCommand(run = True, direction = 0, speed = 100, acceleration = 2)))
-        print("Up arrow key pressed")
-
-def on_down_arrow():
-    if (not commandQueue.full()):
-        commandQueue.put(prepareCanMessage(0x02, prepareSpeedmodeCommand(run = True, direction = 1, speed = 100, acceleration = 2)))
-        print("Down arrow key pressed")
-
-def on_left_arrow():
-    if (not commandQueue.full()):
-        commandQueue.put(prepareCanMessage(0x01, prepareSpeedmodeCommand(run = True, direction = 0, speed = 100, acceleration = 2)))
-        print("Left arrow key pressed")
-
-def on_right_arrow():
-    if (not commandQueue.full()):
-        commandQueue.put(prepareCanMessage(0x01, prepareSpeedmodeCommand(run = True, direction = 1, speed = 100, acceleration = 2)))
-        print("Right arrow key pressed")
-
-def stop():
-    if (not commandQueue.full()):
-        commandQueue.put(prepareCanMessage(0x01, prepareSpeedmodeCommand(run = False, direction = 0, speed = 0, acceleration = 2)))
-        commandQueue.put(prepareCanMessage(0x02, prepareSpeedmodeCommand(run = False, direction = 0, speed = 0, acceleration = 2)))
-        print("no key pressed")
+isStopped = False
+motorBusy = { i : {"busy": False, "rotating": False, "timeWaitedAck": 0} for i in range(1, 7)}
+commandQueue = Queue(maxsize=10)
 
 def cyclicRead():
     if (not commandQueue.full()):
         commandQueue.put(prepareCanMessage(0x01, prepareReadEncoderValue()))
         commandQueue.put(prepareCanMessage(0x02, prepareReadEncoderValue()))
-
-# maximum speed is 3000
-yMotorSpeed = 3000
-xMotorSpeed = 3000
-
-# to rotate 1 cycle, currentPosition + 0x4000
-absolutePos = 0x4000
-relativePos = 0x0f00
-
-# current position = currentPosition + relativePos
-moveRelative = 0xf4
-# current position = albolutePos
-moveAbsolute = 0xf5
-
-isStopped = False
-
-
-motorBusy = [{"busy": False, "rotating": False, "timeWaitedAck": 0} for i in range(6)]
-
-# dictionary that conntains expected answer from encoder for each command. 
-# for each answer, the [start, end] byte is specified.
-# when processing, remember that the start byte is Most Significant Byte.
-commandAnswer = {
-    # relative position axis
-    0xf4: [2, 2],
-    # absolute position axis
-    0xf5: [2, 2],
-    # speed mode
-    0xf6: [2, 2],
-    # read encoder value
-    0x31: [2, 7],
-    # read motor real-time speed (RPM)
-    0x32: [2, 3],
-    # read go back to zero status
-    0x3B: [2, 2]
-}
-
-commandQueue = Queue(maxsize=10)
 
 def prepareCanMessage(arbitrationId: int, data: list[int]) -> can.Message:
     """
@@ -94,131 +37,6 @@ def prepareCanMessage(arbitrationId: int, data: list[int]) -> can.Message:
     crc = sum(data) + arbitrationId & 0xFF
     data.append(crc)
     return can.Message(arbitration_id=arbitrationId, data=data, is_extended_id=False)
-
-def preparePositionModeAxisCommand(relative, speed, acceleration, axis) -> list[int]:
-    """
-    Prepare the data to:\n
-    Move the motor to the specified axis with specified speed and acceleration.\n
-    relative: True for relative, False for absolute\n
-    speed: The speed of the motor (0-3000) (2 byte [2-3])\n
-    acceleration: Acceleration/Deceleration of the motor (0-255) (1 byte [4])\n
-    axis: The axis to move the motor to (-8388607 - +8388607) (3 byte [5-7])\n
-    Need to append the arbitration ID and CRC with "prepareCanMessage" before sending.\n
-
-    Relative response: \n
-    F4 [status], with [status] = 0 (failed), 1 (start running), 2 (run completed), 3 (end stopper reached)\n
-
-    Absolute response: \n
-    F5 [status], with [status] = 0 (failed), 1 (start running), 2 (run completed), 3 (end stopper reached)\n
-    """
-    if relative == True:
-        return [0xf4, speed >> 8, speed & 0xFF, acceleration & 0xFF, (axis >> 16) & 0xFF, (axis >> 8) & 0xFF, axis & 0xFF]
-    else:
-        return [0xf5, speed >> 8, speed & 0xFF, acceleration & 0xFF, (axis >> 16) & 0xFF, (axis >> 8) & 0xFF, axis & 0xFF]
-
-def prepareSpeedmodeCommand(run: bool, direction:int, speed: int, acceleration: int) -> list[int]:
-    """
-    Prepare the data to spin the motor freely in direction, with speed and acceleration:\n
-    run: True to run, False to stop\n
-    Run the motor (True)
-        direction: True for clockwise, False for counterclockwise\n
-        speed: The speed of the motor (0-3000) (4 low bit of byte 2 and full byte 3)\n
-        acceleration: Acceleration of the motor (0-255) (1 byte [4])\n
-    Stop the motor (False)
-        direction: False\n
-        speed: 0x00\n
-        acceleration: Deceleration of the motor (0-255) (1 byte [4])\n
-    
-    Response for run\n
-    F6 [status], with [status] = 0 (failed), 1 (run completed)\n
-    Response for stop\n
-    F6 [status], with [status] = 0 (failed), 1 (stopping), 2 (stopped)\n
-    """
-    if run:
-        return [0xf6, (0x00 | (direction << 7)) | (speed >> 8)  ,speed & 0xFF, acceleration & 0xFF]
-    else:
-        return [0xf6, 0x00, 0x00, acceleration & 0xFF]
-    
-def prepareReadEncoderValue() -> list[int]:
-    """
-    Prepare the data to read the encoder value:\n
-    Response:\n
-    31 [value], with [value] (6 bytes), signed int.\n
-    """
-    return [0x31]
-
-def prepareReadMotorSpeed() -> list[int]:
-    """
-    Prepare the data to read the motor speed:\n
-    Response:\n
-    32 [value], with [value] (2 bytes), signed int.\n
-    """
-    return [0x32]
-
-def prepareReadGoBackZero() -> list[int]:
-    """
-    Prepare the data to read the go back to zero:\n
-    Response:\n
-    3B [value], with [value] (1 byte): 0 (going back to zero), 1 (zero reached), 2 (failed)\n
-    """
-    return [0x3B]
-
-def prepareSetCanID(id: int) -> list[int]:
-    """
-    Prepare the data to set the CAN ID:\n
-    id: new ID for the Can slave\n
-    Response:\n
-    8B,  [value], with [value] (1 byte): 1 (success), 0 (failed)\n
-    """
-    return [0x8B, (id >> 8) & 0xFF, id & 0xFF]
-
-def prepareGoHome() -> list[int]:
-    """
-    Prepare the data to go back to zero:\n
-    Response:\n
-    3B [value], with [value] (1 byte): 0 (go home failed), 1 (go home start), 2 (go home success)\n
-    """
-    return [0x91]
-
-def prepareInitializeMotor(currentID: int, newID: int) -> list[int]:
-    """
-    Conduct a list of steps to initialize the motor:\n
-    """
-
-    # 2. Set working mode (SR_vFOC)
-    setWorkingMode = [0x82, 5]
-    # 3. Set Protection function (on)
-    setProtection = [0x88, 1]
-    # 4. Set subdivision interpolation to enable (255)
-    setMplyer = [0x89, 1]
-    # 5. Set home command
-    # 90 [homeTrigger (low)] [homeDirection (CW)] [homeSpeed 00 60 (dec)] [Endlimit (enabled)]
-    setHomeCommand = [90, 0, 0, 0, 60, 1]
-    # 5. enable limit port mapping (only for 42D motor, which has CanID > 2)
-    setLimitPortRemap = [0x9E, 1]
-    # 99. Set the new ID
-    setID = prepareSetCanID(newID)
-    if (newID > 2):
-        return [setWorkingMode, setProtection, setMplyer, setHomeCommand, setID]
-    else:
-        return [setWorkingMode, setProtection, setMplyer, setHomeCommand, setLimitPortRemap,setID]
-
-def initializeMotor(bus: can.interface.Bus, currentID: int, newID: int) -> None:
-    """
-    Initializes the motor by sending a series of commands to set its ID, working mode, protection function,
-    subdivision interpolation, and home command.
-
-    Args:
-        bus: The `can.interface.Bus` instance representing the CAN bus to send messages on.
-        currentID: The current CAN ID of the motor.
-        newID: The new CAN ID to set for the motor.
-
-    Note:
-        This function sends a series of commands to the motor and waits for responses.
-    """
-    messages = prepareInitializeMotor(currentID, newID)
-    for i in range(len(messages)):
-            canSendMessage(bus, [prepareCanMessage(currentID, messages[i])], motorBusy)
 
 def processSendMessage(commandQueue: Queue[can.Message], motorBusy) -> List[can.Message]:
     """
@@ -279,94 +97,127 @@ def canSendMessage(bus: can.interface.Bus, messages: list) -> None:
             f"Sent: arbitration_id=0x{msg.arbitration_id:X}, data=[{data_bytes}], is_extended_id=False"
         )
 
+def initializeMotor(bus: can.interface.Bus, currentID: int, newID: int) -> None:
+    """
+    Initializes the motor by sending a series of commands to set its ID, working mode, protection function,
+    subdivision interpolation, and home command.
 
-def canReceiveMessage(buffReader: can.BufferedReader) -> None:
+    Args:
+        bus: The `can.interface.Bus` instance representing the CAN bus to send messages on.
+        currentID: The current CAN ID of the motor.
+        newID: The new CAN ID to set for the motor.
+
+    Note:
+        This function sends a series of commands to the motor and waits for responses.
+    """
+    messages = prepareInitializeMotor(currentID, newID)
+    for i in range(len(messages)):
+            canSendMessage(bus, [prepareCanMessage(currentID, messages[i])], motorBusy)
+
+def processReceivedMessage(buffReader: can.BufferedReader) -> None:
     while buffReader.buffer.qsize() > 0:
-        received_msg = buffReader.get_message()
-        if received_msg is not None:
-            receivedCommand = received_msg.data[0]
+        receivedMsg = buffReader.get_message()
+        if receivedMsg is not None:
+            receivedCommand = receivedMsg.data[0]
             if receivedCommand in commandAnswer.keys():
                 value = 0
                 start, end = commandAnswer[receivedCommand]
                 for i in range(start-1, end):
-                    value |= (received_msg.data[i] << (8 * (i - (start - 1))))
-                print(f'Received: arbitration_id=0x{received_msg.arbitration_id:X}: {receivedCommand:X} {value}')
+                    value |= (receivedMsg.data[i] << (8 * (i - (start - 1))))
+                print(f'Received: arbitration_id=0x{receivedMsg.arbitration_id:X}: {receivedCommand:X} {value}')
                 if receivedCommand == 0xf6:
                     if value == 2:
-                        motorBusy[received_msg.arbitration_id]["rotating"] = False
+                        motorBusy[receivedMsg.arbitration_id]["rotating"] = False
                     else:
-                        motorBusy[received_msg.arbitration_id]["busy"] = False
+                        motorBusy[receivedMsg.arbitration_id]["busy"] = False
                 elif receivedCommand in [0xf4, 0xf5]:
                     if value == 2:
-                        motorBusy[received_msg.arbitration_id]["busy"] = False
+                        motorBusy[receivedMsg.arbitration_id]["busy"] = False
                         print("Run axis completed")
                     elif value == 3:
-                        motorBusy[received_msg.arbitration_id]["busy"] = False
+                        motorBusy[receivedMsg.arbitration_id]["busy"] = False
                         print("Stopped due to end limit")
             else:
                 received_data_bytes = ", ".join(
-                [f"0x{byte:02X}" for byte in received_msg.data]
+                [f"0x{byte:02X}" for byte in receivedMsg.data]
                 )
                 print(
-                    f"Received: arbitration_id=0x{received_msg.arbitration_id:X}, data=[{received_data_bytes}], is_extended_id=False"
+                    f"Received: arbitration_id=0x{receivedMsg.arbitration_id:X}, data=[{received_data_bytes}], is_extended_id=False"
                 )
         else:
             break
 
+def checkAckTimeout():
+    """
+    Check the ack timeout, if the motor take too long to answer, release the lock "busy" and "rotating" to allow 
+    control.
+    """
+    global motorBusy
+    for id, motor in motorBusy.items():
+        if motor["busy"] or motor["rotating"]:
+            duration = time.time() - motor["timeWaitedAck"]
+            if duration >= 5:
+                motor["busy"] = False
+                motor["rotating"] = False
+                print(f"motorID:{id} ack timeout" )
+
 
 def main() -> None:
+    global isStopped
     """
     Main function to read CAN messages from a .txt file, send them through a CAN bus, and adjust speeds within packets.
     """
-    bus = can.interface.Bus(interface="slcan", channel="COM3", bitrate=500000)  
+    # real bus
+    # bus = can.interface.Bus(interface="slcan", channel="COM3", bitrate=500000)  
+    # virtual bus
+    bus = can.interface.Bus(interface="virtual", receive_own_messages=True)  
 
     print("Press arrow keys to call functions. Press ESC to exit.")
 
     buffReader = can.BufferedReader()
 
-    DEADZONE = 0.1
+    delay_100ms = 0
 
     while (True):
         pygame.event.pump()
-
         for event in pygame.event.get():
+            if event.type == pygame.JOYBUTTONDOWN:
+                handle_button_press(event.button, buffer)
+            if event.type == pygame.JOYBUTTONUP:
+                handle_button_release(event.button, buffer)
             if event.type == pygame.JOYAXISMOTION:
-                axis_value = joystick.get_axis(event.axis)
-                print(f"Trục {event.axis} di chuyển với giá trị: {axis_value:.2f}") 
-                if event.axis == 0:  # Trục X (trái/phải)
-                    if axis_value < -DEADZONE and axis_value != previous_axis_values[0]:
-                        on_left_arrow()
-                        previous_axis_values[0] = axis_value  
-                        isStopped = False
-                    elif axis_value > DEADZONE and axis_value != previous_axis_values[0]:
-                        on_right_arrow()
-                        previous_axis_values[0] = axis_value 
-                        isStopped = False 
-                elif event.axis == 1:  # Trục Y (lên/xuống)
-                    if axis_value < -DEADZONE and axis_value != previous_axis_values[1]:
-                        on_up_arrow()
-                        previous_axis_values[1] = axis_value  
-                        isStopped = False
-                    elif axis_value > DEADZONE and axis_value != previous_axis_values[1]:
-                        on_down_arrow()
-                        previous_axis_values[1] = axis_value 
-                        isStopped = False
-                else:
-                    if not isStopped:
-                        stop()
-                        isStopped = True
+                handle_axis_motion(event.axis, event.value, buffer)
+        
+        for i in range(len(buffer)):
+            if buffer[i] == -1:
+                if (not commandQueue.full()):
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 0, speed = 100, acceleration = 2)))
+                    isStoppedBuffer[i] = False
+            elif buffer[i] == 1:
+                if (not commandQueue.full()):
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 1, speed = 100, acceleration = 2)))
+                    isStoppedBuffer[i] = False
+            elif buffer[i] == 0:
+                if (isStoppedBuffer[i] == False and not commandQueue.full()):
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = False, direction = 0, speed = 0, acceleration = 2)))
+                    isStoppedBuffer[i] = True
             else:
-                if not isStopped:
-                    stop()
-                    isStopped = True
-        cyclicRead()
+                raise ValueError("Wtf?")
+
+
+        # a bunch of function that read the status of motors:
+        # if delay_100ms < 20:
+        #     delay_100ms += 1
+        # else:
+        #     cyclicRead()
+        #     delay_100ms = 0
 
         
         processedMessage = processSendMessage(commandQueue, motorBusy)
         canSendMessage(bus, messages=processedMessage)
-        time.sleep(0.004)
-        canReceiveMessage(buffReader)
-
+        time.sleep(0.01)
+        processReceivedMessage(buffReader)
+        checkAckTimeout()
         if keyboard.is_pressed("esc"):
             break
     bus.shutdown()
