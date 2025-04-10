@@ -57,16 +57,16 @@ def processSendMessage(commandQueue: Queue[can.Message], motorBusy) -> List[can.
         if (msg.data[0] in [0xf4, 0xf5, 0xf6]) and ((msg.data[1] | msg.data[2]) > 0):
             # check if the motor is busy, if yes, discard the command
             if motorBusy[msg.arbitration_id]["busy"] == True:
-                print("Motor busy, command discarded")
+                print("-", end="")
                 continue
             elif motorBusy[msg.arbitration_id]["rotating"] == True and msg.data[0] == 0xf6:
-                print("Motor rotating, command discarded")
+                print(".", end="")
                 continue
             else:
                 # send it.
                 motorBusy[msg.arbitration_id]["busy"] = True
                 motorBusy[msg.arbitration_id]["timeWaitedAck"] = time.time()
-                if msg.data[0] == 0xf4:
+                if msg.data[0] == 0xf6:
                     motorBusy[msg.arbitration_id]["rotating"] = True
                 send = True
         else:
@@ -112,7 +112,7 @@ def initializeMotor(bus: can.interface.Bus, currentID: int, newID: int) -> None:
     """
     messages = prepareInitializeMotor(currentID, newID)
     for i in range(len(messages)):
-            canSendMessage(bus, [prepareCanMessage(currentID, messages[i])], motorBusy)
+            canSendMessage(bus, [prepareCanMessage(currentID, messages[i])])
 
 def processReceivedMessage(buffReader: can.BufferedReader) -> None:
     while buffReader.buffer.qsize() > 0:
@@ -123,7 +123,13 @@ def processReceivedMessage(buffReader: can.BufferedReader) -> None:
                 value = 0
                 start, end = commandAnswer[receivedCommand]
                 for i in range(start-1, end):
-                    value |= (receivedMsg.data[i] << (8 * (i - (start - 1))))
+                    value |= (receivedMsg.data[i])
+                    value = value << 8
+                value = (value >> 8)
+                # convert to negative value
+                # check if the MSB is 1 (negative)
+                if (value & (1 << (8 * (end-start+1) - 1))) != 0:
+                    value = value - (1 << (8 * (end-start+1)))
                 print(f'Received: arbitration_id=0x{receivedMsg.arbitration_id:X}: {receivedCommand:X} {value}')
                 if receivedCommand == 0xf6:
                     if value == 2:
@@ -168,15 +174,18 @@ def main() -> None:
     Main function to read CAN messages from a .txt file, send them through a CAN bus, and adjust speeds within packets.
     """
     # real bus
-    # bus = can.interface.Bus(interface="slcan", channel="COM3", bitrate=500000)  
+    bus = can.interface.Bus(interface="slcan", channel="COM3", bitrate=500000)  
     # virtual bus
-    bus = can.interface.Bus(interface="virtual", receive_own_messages=True)  
+    # bus = can.interface.Bus(interface="virtual", receive_own_messages=True)  
 
     print("Press arrow keys to call functions. Press ESC to exit.")
 
     buffReader = can.BufferedReader()
+    notifier = can.Notifier(bus, [buffReader])
 
     delay_100ms = 0
+
+    initializeMotor(bus, currentID=0x01, newID=0x03)
 
     while (True):
         pygame.event.pump()
@@ -191,26 +200,26 @@ def main() -> None:
         for i in range(len(buffer)):
             if buffer[i] == -1:
                 if (not commandQueue.full()):
-                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 0, speed = 100, acceleration = 2)))
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 0, speed = 20, acceleration = 2)))
                     isStoppedBuffer[i] = False
             elif buffer[i] == 1:
                 if (not commandQueue.full()):
-                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 1, speed = 100, acceleration = 2)))
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 1, speed = 20, acceleration = 2)))
                     isStoppedBuffer[i] = False
             elif buffer[i] == 0:
                 if (isStoppedBuffer[i] == False and not commandQueue.full()):
-                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = False, direction = 0, speed = 0, acceleration = 2)))
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = False, direction = 0, speed = 0, acceleration = 50)))
                     isStoppedBuffer[i] = True
             else:
                 raise ValueError("Wtf?")
 
 
         # a bunch of function that read the status of motors:
-        # if delay_100ms < 20:
-        #     delay_100ms += 1
-        # else:
-        #     cyclicRead()
-        #     delay_100ms = 0
+        if delay_100ms < 100:
+            delay_100ms += 1
+        else:
+            cyclicRead()
+            delay_100ms = 0
 
         
         processedMessage = processSendMessage(commandQueue, motorBusy)
@@ -220,6 +229,7 @@ def main() -> None:
         checkAckTimeout()
         if keyboard.is_pressed("esc"):
             break
+    notifier.stop()
     bus.shutdown()
 
 
