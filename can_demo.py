@@ -23,6 +23,7 @@ isStoppedBuffer = [False, False, False, False, False, False]
 
 isStopped = False
 motorBusy = { i : {"busy": False, "rotating": False, "timeWaitedAck": 0} for i in range(1, 7)}
+speedConfig = [40, 100, 100, 1500, 20, 20]
 commandQueue = Queue(maxsize=10)
 
 def cyclicRead():
@@ -174,7 +175,7 @@ def main() -> None:
     Main function to read CAN messages from a .txt file, send them through a CAN bus, and adjust speeds within packets.
     """
     # real bus
-    bus = can.interface.Bus(interface="slcan", channel="COM3", bitrate=500000)  
+    bus = can.interface.Bus(interface="slcan", channel="COM6", bitrate=500000)  
     # virtual bus
     # bus = can.interface.Bus(interface="virtual", receive_own_messages=True)  
 
@@ -185,7 +186,10 @@ def main() -> None:
 
     delay_100ms = 0
 
-    initializeMotor(bus, currentID=0x01, newID=0x03)
+    # initializeMotor(bus, currentID=0x01, newID=0x01)
+    # initializeMotor(bus, currentID=0x02, newID=0x02)
+    # initializeMotor(bus, currentID=0x03, newID=0x03)
+    # initializeMotor(bus, currentID=0x04, newID=0x04)
 
     while (True):
         pygame.event.pump()
@@ -200,26 +204,26 @@ def main() -> None:
         for i in range(len(buffer)):
             if buffer[i] == -1:
                 if (not commandQueue.full()):
-                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 0, speed = 20, acceleration = 2)))
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 0, speed = speedConfig[i], acceleration = 60)))
                     isStoppedBuffer[i] = False
             elif buffer[i] == 1:
                 if (not commandQueue.full()):
-                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 1, speed = 20, acceleration = 2)))
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = True, direction = 1, speed = speedConfig[i], acceleration = 60)))
                     isStoppedBuffer[i] = False
             elif buffer[i] == 0:
                 if (isStoppedBuffer[i] == False and not commandQueue.full()):
-                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = False, direction = 0, speed = 0, acceleration = 50)))
+                    commandQueue.put(prepareCanMessage(i+1, prepareSpeedmodeCommand(run = False, direction = 0, speed = 0, acceleration = 200)))
                     isStoppedBuffer[i] = True
             else:
                 raise ValueError("Wtf?")
 
 
         # a bunch of function that read the status of motors:
-        if delay_100ms < 100:
-            delay_100ms += 1
-        else:
-            cyclicRead()
-            delay_100ms = 0
+        # if delay_100ms < 100:
+        #     delay_100ms += 1
+        # else:
+        #     cyclicRead()
+        #     delay_100ms = 0
 
         
         processedMessage = processSendMessage(commandQueue, motorBusy)
